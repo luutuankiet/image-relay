@@ -1,0 +1,22 @@
+services:
+  image-relay:
+    build: .
+    container_name: image-relay
+    restart: unless-stopped
+    environment:
+      - PORT=7799
+      - BASE_URL=https://img.kenluu.org
+      - TTL_HOURS=2
+      - MAX_SIZE_MB=10
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.image-relay.rule=Host(`img.kenluu.org`)
+      - traefik.http.routers.image-relay.entrypoints=websecure
+      - traefik.http.routers.image-relay.tls.certresolver=letsencrypt
+      - traefik.http.services.image-relay.loadbalancer.server.port=7799
+    networks:
+      - frontend
+
+networks:
+  frontend:
+    external: true
