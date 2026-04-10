@@ -1,4 +1,5 @@
 const express = require('express');
+const multer = require('multer');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -27,29 +28,93 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
-// Upload: POST /upload
-// Accepts raw binary body with Content-Type header
-app.post('/upload', express.raw({ type: '*/*', limit: MAX_SIZE }), (req, res) => {
-  if (!req.body || req.body.length === 0) {
+// Multer for multipart/form-data uploads (memory storage)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_SIZE }
+});
+
+// Determine MIME type and extension
+function getExtension(mime) {
+  if (mime.includes('png')) return '.png';
+  if (mime.includes('jpeg') || mime.includes('jpg')) return '.jpg';
+  if (mime.includes('gif')) return '.gif';
+  if (mime.includes('webp')) return '.webp';
+  if (mime.includes('svg')) return '.svg';
+  return '';
+}
+
+// Detect actual MIME from magic bytes if Content-Type is unreliable
+function detectMimeFromBuffer(buf) {
+  if (!buf || buf.length < 8) return null;
+  // PNG: 89 50 4E 47
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return 'image/png';
+  // JPEG: FF D8 FF
+  if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return 'image/jpeg';
+  // GIF: 47 49 46 38
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return 'image/gif';
+  // WEBP: 52 49 46 46 ... 57 45 42 50
+  if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+      buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return 'image/webp';
+  return null;
+}
+
+// Core upload handler — works with both raw and multipart-extracted buffers
+function handleUpload(buffer, mime, res) {
+  if (!buffer || buffer.length === 0) {
     return res.status(400).json({ error: 'Empty body' });
   }
 
+  // If MIME looks wrong (e.g. still multipart), try detecting from magic bytes
+  if (!mime || mime.includes('multipart') || mime === 'application/octet-stream') {
+    const detected = detectMimeFromBuffer(buffer);
+    if (detected) mime = detected;
+  }
+
   const key = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
-  const mime = req.headers['content-type'] || 'application/octet-stream';
-  const ext = mime.includes('png') ? '.png' 
-            : mime.includes('jpeg') || mime.includes('jpg') ? '.jpg'
-            : mime.includes('gif') ? '.gif'
-            : mime.includes('webp') ? '.webp'
-            : mime.includes('svg') ? '.svg'
-            : '';
+  const ext = getExtension(mime);
   const filename = `${key}${ext}`;
 
-  fs.writeFileSync(path.join(STORE_DIR, filename), req.body);
-  index.set(filename, { mime, created: Date.now(), size: req.body.length });
+  fs.writeFileSync(path.join(STORE_DIR, filename), buffer);
+  index.set(filename, { mime, created: Date.now(), size: buffer.length });
 
   const url = `${BASE_URL}/i/${filename}`;
-  console.log(`[upload] ${filename} (${req.body.length} bytes, ${mime}) -> ${url}`);
-  res.json({ key, filename, url, size: req.body.length, ttl_seconds: TTL_MS / 1000 });
+  console.log(`[upload] ${filename} (${buffer.length} bytes, ${mime}) -> ${url}`);
+  res.json({ key, filename, url, size: buffer.length, ttl_seconds: TTL_MS / 1000 });
+}
+
+// Upload: POST /upload
+// Supports both raw binary body AND multipart/form-data
+app.post('/upload', (req, res, next) => {
+  const contentType = req.headers['content-type'] || '';
+
+  if (contentType.startsWith('multipart/form-data')) {
+    // Multipart: parse with multer, extract the file buffer
+    upload.any()(req, res, (err) => {
+      if (err) {
+        console.error(`[upload] multer error: ${err.message}`);
+        return res.status(400).json({ error: err.message });
+      }
+      if (!req.files || req.files.length === 0) {
+        return res.status(400).json({ error: 'No file in multipart body' });
+      }
+      // Take the first file from any field name
+      const file = req.files[0];
+      const mime = file.mimetype || 'application/octet-stream';
+      console.log(`[upload] multipart detected: field=${file.fieldname}, originalName=${file.originalname}, mimetype=${mime}`);
+      handleUpload(file.buffer, mime, res);
+    });
+  } else {
+    // Raw binary upload
+    express.raw({ type: '*/*', limit: MAX_SIZE })(req, res, (err) => {
+      if (err) {
+        console.error(`[upload] raw parse error: ${err.message}`);
+        return res.status(400).json({ error: err.message });
+      }
+      const mime = contentType || 'application/octet-stream';
+      handleUpload(req.body, mime, res);
+    });
+  }
 });
 
 // Download: GET /i/:filename
