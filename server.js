@@ -61,7 +61,7 @@ function detectMimeFromBuffer(buf) {
 
 // Core upload handler — works with both raw and multipart-extracted buffers
 function handleUpload(buffer, mime, res) {
-  if (!buffer || buffer.length === 0) {
+  if (!buffer || !Buffer.isBuffer(buffer) || buffer.length === 0) {
     return res.status(400).json({ error: 'Empty body' });
   }
 
